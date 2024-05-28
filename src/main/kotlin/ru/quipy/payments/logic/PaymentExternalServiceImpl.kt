@@ -17,29 +17,23 @@ import java.util.concurrent.Executors
 
 
 // Advice: always treat time as a Duration
-class PaymentExternalServiceImpl(
-    private val properties: ExternalServiceProperties,
-) : PaymentExternalService {
+class PaymentExternalServiceImpl(accounts: List<ExternalServiceProperties>) : PaymentExternalService {
+
+    private val paymentAccountManagementService = PaymentAccountManagementService(accounts)
 
     companion object {
         val logger = LoggerFactory.getLogger(PaymentExternalServiceImpl::class.java)
 
         val paymentOperationTimeout = Duration.ofSeconds(80)
-
+        val sleepingDuration = Duration.ofSeconds(1)
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
     }
 
-    private val serviceName = properties.serviceName
-    private val accountName = properties.accountName
-    private val requestAverageProcessingTime = properties.request95thPercentileProcessingTime
-    private val rateLimitPerSec = properties.rateLimitPerSec
-    private val parallelRequests = properties.parallelRequests
-
     @Autowired
     private lateinit var paymentESService: EventSourcingService<UUID, PaymentAggregate, PaymentAggregateState>
 
-    private val httpClientExecutor = Executors.newSingleThreadExecutor()
+    private val httpClientExecutor = Executors.newFixedThreadPool(128)
 
     private val client = OkHttpClient.Builder().run {
         dispatcher(Dispatcher(httpClientExecutor))
@@ -47,6 +41,17 @@ class PaymentExternalServiceImpl(
     }
 
     override fun submitPaymentRequest(paymentId: UUID, amount: Int, paymentStartedAt: Long) {
+        var accountToExecutePayment = paymentAccountManagementService.chooseAccountToExecutePayment()
+
+        while (accountToExecutePayment == null) {
+            logger.warn("There are no free accounts at the moment...")
+            Thread.sleep(sleepingDuration.toMillis())
+            accountToExecutePayment = paymentAccountManagementService.chooseAccountToExecutePayment()
+        }
+
+        val accountName = accountToExecutePayment.properties.accountName
+        val serviceName = accountToExecutePayment.properties.serviceName
+
         logger.warn("[$accountName] Submitting payment request for payment $paymentId. Already passed: ${now() - paymentStartedAt} ms")
 
         val transactionId = UUID.randomUUID()
