@@ -7,16 +7,32 @@ class PaymentAccountStatus(val properties: ExternalServiceProperties) {
     private val timeOfLastPaymentRequest = AtomicInteger(System.currentTimeMillis().toInt())
     private val numberOfPaymentRequests = AtomicInteger(0)
 
+    val speed: Double
+        get() = with(properties) {
+            val averageProcessingTime = request95thPercentileProcessingTime.toMillis().toDouble() / 1000
+            val parallelRequestNumber = parallelRequests.toDouble()
+            val rateLimitPerSecond = rateLimitPerSec.toDouble()
+
+            parallelRequestNumber.coerceAtMost(rateLimitPerSecond) / averageProcessingTime;
+        }
+
     val canExecuteRequest: Boolean
         get() {
             val currentTime = System.currentTimeMillis().toInt()
 
-            if (currentTime - timeOfLastPaymentRequest.get() > INTERVAL_BETWEEN_REQUESTS) {
-                timeOfLastPaymentRequest.set(currentTime)
-                numberOfPaymentRequests.set(0)
-            }
+            synchronized(this) {
+                if (currentTime - timeOfLastPaymentRequest.get() > INTERVAL_BETWEEN_REQUESTS) {
+                    timeOfLastPaymentRequest.set(currentTime)
+                    numberOfPaymentRequests.set(0)
+                }
 
-            return numberOfPaymentRequests.get() < properties.rateLimitPerSec
+                if (numberOfPaymentRequests.get() < properties.rateLimitPerSec) {
+                    numberOfPaymentRequests.incrementAndGet()
+                    return true
+                } else {
+                    return false
+                }
+            }
         }
 
     fun addRequestForExecution() {
